@@ -104,82 +104,21 @@ preflight
 
 # Auto-detect (N,K) shapes from the model's architecture config.
 # Covers QKV projections, output projections, shared experts, dense FFN,
-# and linear attention heads (e.g. Mamba-style).
+# linear attention heads (e.g. Mamba-style), and MoE expert FFN (DeepSeek).
+# Detection logic lives in lib/detect.py (single source of truth).
 if [[ ${#SHAPES[@]} -eq 0 && -n "$MODEL" ]]; then
     echo "  🔍 Auto-detecting weight shapes for $MODEL (TP=$TP)..."
-    DETECTED=$(docker exec "$CONTAINER" $INIT_WRAPPER python3 -c "
-import sys
-try:
-    from vllm.transformers_utils.config import get_config
-    config = get_config(model='$MODEL', trust_remote_code=True)
+    DETECTED=$(docker exec "$CONTAINER" $INIT_WRAPPER python3 -c \
+        "$(cat "$SCRIPT_DIR/lib/detect.py")" "$MODEL" --tp "$TP" --mode shapes 2>&1) || true
 
-    # Handle nested text_config (e.g. Qwen3.5 VL/MoE models)
-    tc = getattr(config, 'text_config', config)
-
-    hidden_size = getattr(tc, 'hidden_size', None)
-    if not hidden_size:
-        print('ERROR: cannot detect hidden_size', file=sys.stderr)
-        sys.exit(1)
-
-    num_heads = getattr(tc, 'num_attention_heads', 16)
-    num_kv_heads = getattr(tc, 'num_key_value_heads', num_heads)
-    head_dim = getattr(tc, 'head_dim', hidden_size // num_heads)
-    shared_expert_size = getattr(tc, 'shared_expert_intermediate_size', None)
-    intermediate_size = getattr(tc, 'intermediate_size', None)
-    moe_intermediate_size = getattr(tc, 'moe_intermediate_size', None)
-    tp = $TP
-
-    shapes = set()
-
-    # Full-attention QKV projection: (Q_dim + K_dim + V_dim) / TP
-    q_dim = num_heads * head_dim
-    kv_dim = num_kv_heads * head_dim
-    qkv_out = (q_dim + 2 * kv_dim) // tp
-    shapes.add((qkv_out, hidden_size))
-
-    # Attention output: hidden_size, (num_heads * head_dim) / TP
-    shapes.add((hidden_size, q_dim // tp))
-
-    # Linear attention projections (Mamba-style, if present)
-    lin_key_heads = getattr(tc, 'linear_num_key_heads', None)
-    lin_val_heads = getattr(tc, 'linear_num_value_heads', None)
-    lin_key_dim = getattr(tc, 'linear_key_head_dim', None)
-    lin_val_dim = getattr(tc, 'linear_value_head_dim', None)
-    if all(v is not None for v in [lin_key_heads, lin_val_heads, lin_key_dim, lin_val_dim]):
-        lin_out = (lin_key_heads * lin_key_dim + lin_val_heads * lin_val_dim +
-                   lin_key_heads * lin_key_dim)
-        shapes.add((lin_out // tp, hidden_size))
-
-    # Shared expert gate+up and down projections
-    if shared_expert_size:
-        shapes.add((shared_expert_size, hidden_size))
-        shapes.add((hidden_size, shared_expert_size // tp))
-
-    # Dense FFN (if present, non-MoE layers)
-    if intermediate_size:
-        shapes.add((intermediate_size // tp, hidden_size))
-        shapes.add((hidden_size, intermediate_size // tp))
-
-    # MoE expert FFN (DeepSeek-V3/V4 use moe_intermediate_size)
-    if moe_intermediate_size:
-        shapes.add((moe_intermediate_size, hidden_size))
-        shapes.add((hidden_size, moe_intermediate_size // tp))
-
-    for n, k in sorted(shapes):
-        print(f'{n},{k}')
-except Exception as e:
-    print(f'ERROR: {e}', file=sys.stderr)
-    sys.exit(1)
-" 2>&1) || true
-
-    # Parse output — skip error lines
-    while IFS= read -r line; do
-        if [[ "$line" =~ ^[0-9]+,[0-9]+$ ]]; then
-            SHAPES+=("$line")
-        elif [[ "$line" == ERROR:* ]]; then
-            echo "  ⚠ $line" >&2
-        fi
-    done <<< "$DETECTED"
+    # detect.py outputs a single JSON line; filter out any vLLM/HF log noise
+    JSON_LINE=$(echo "$DETECTED" | grep '^{' | tail -1 || true)
+    if [[ -n "$JSON_LINE" ]]; then
+        mapfile -t SHAPES < <(echo "$JSON_LINE" | jq -r '.shapes[]' 2>/dev/null)
+    else
+        echo "  ⚠ Shape detection produced no JSON output." >&2
+        echo "$DETECTED" | head -5 | sed 's/^/    /' >&2
+    fi
 
     if [[ ${#SHAPES[@]} -eq 0 ]]; then
         echo "  ❌ Could not detect shapes. Use --shapes N,K to specify manually." >&2

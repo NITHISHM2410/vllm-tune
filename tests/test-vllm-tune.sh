@@ -256,17 +256,36 @@ else
     fail "Dry-run arch detection bypass broken"
 fi
 
-# Verify the detection code exists in the script
-if grep -qi "detect whether model uses Mixture-of-Experts" "$VLLM_TUNE"; then
-    pass "Architecture detection code present in vllm-tune.sh"
+# Verify the detection code exists (centralized in lib/detect.py)
+DETECT_PY="$SCRIPT_DIR/lib/detect.py"
+if [[ -f "$DETECT_PY" ]]; then
+    pass "lib/detect.py exists"
 else
-    fail "Architecture detection code missing from vllm-tune.sh"
+    fail "lib/detect.py missing"
 fi
 
-if grep -q "num_local_experts" "$VLLM_TUNE"; then
-    pass "num_local_experts check present in detection code"
+if grep -q "num_local_experts" "$DETECT_PY"; then
+    pass "num_local_experts check present in lib/detect.py"
 else
-    fail "num_local_experts check missing from detection code"
+    fail "num_local_experts check missing from lib/detect.py"
+fi
+
+if grep -q "n_routed_experts" "$DETECT_PY"; then
+    pass "n_routed_experts check present (DeepSeek-V3/V4)"
+else
+    fail "n_routed_experts check missing from lib/detect.py"
+fi
+
+if grep -q "moe_intermediate_size" "$DETECT_PY"; then
+    pass "moe_intermediate_size shape detection present (DeepSeek)"
+else
+    fail "moe_intermediate_size missing from lib/detect.py"
+fi
+
+if grep -q "detect.py" "$VLLM_TUNE"; then
+    pass "vllm-tune.sh references lib/detect.py"
+else
+    fail "vllm-tune.sh does not reference lib/detect.py"
 fi
 
 if grep -q "is a dense model" "$VLLM_TUNE"; then
@@ -291,6 +310,19 @@ for script in "$VLLM_TUNE" "$TUNE_MOE" "$TUNE_FP8" "$SCRIPT_DIR/lib/common.sh"; 
         pass "$name: valid bash syntax"
     else
         fail "$name: syntax errors detected"
+    fi
+done
+
+for pyscript in "$SCRIPT_DIR/lib/detect.py" "$SCRIPT_DIR/dist-tune.py"; do
+    name=$(basename "$pyscript")
+    if [[ -f "$pyscript" ]]; then
+        if python3 -c "import py_compile; py_compile.compile('$pyscript', doraise=True)" 2>/dev/null; then
+            pass "$name: valid Python syntax"
+        else
+            fail "$name: syntax errors detected"
+        fi
+    else
+        fail "$name: file not found"
     fi
 done
 
@@ -331,7 +363,7 @@ fi
 
 # ── Export/import flag parsing ─────────────────────────────────────
 
-printf "\n\033[1m  Export/import flags\033[0m\n"
+printf "\n\033[1m  Export/import and distributed flags\033[0m\n"
 
 # Export requires existing configs — just test that it doesn't crash on parse
 output=$("$VLLM_TUNE" test/model --export-sparkrun --tp 1 --dry-run --foreground 2>&1) || true
@@ -341,6 +373,20 @@ else
     # Export exits early without dry-run gating, so it may try to run.
     # That's fine — the flag was parsed.
     pass "--export-sparkrun flag parsed (early exit path)"
+fi
+
+# --dist flag should be accepted (dry-run skips actual distributed exec)
+output=$("$VLLM_TUNE" test/model --dist --tp 1 --dry-run --foreground 2>&1)
+if [[ $? -eq 0 ]]; then
+    pass "--dist flag accepted with --dry-run"
+else
+    fail "--dist flag rejected" "$output"
+fi
+
+if [[ -f "$SCRIPT_DIR/dist-tune.py" ]]; then
+    pass "dist-tune.py exists"
+else
+    fail "dist-tune.py not found"
 fi
 
 # ── Summary ─────────────────────────────────────────────────────────
