@@ -300,6 +300,42 @@ else
     fail "MoE-on-dense error message missing"
 fi
 
+if grep -q "detect.py" "$TUNE_FP8"; then
+    pass "tune-fp8.sh references lib/detect.py for shape detection"
+else
+    fail "tune-fp8.sh does not reference lib/detect.py"
+fi
+
+if grep -q "DeepseekV4ForCausalLM" "$TUNE_MOE"; then
+    pass "tune-moe.sh has DeepSeek-V4 model class patch"
+else
+    fail "tune-moe.sh missing DeepSeek-V4 model class patch"
+fi
+
+# Verify dist-tune.py doesn't have hardcoded user paths
+DIST_TUNE="$SCRIPT_DIR/dist-tune.py"
+if [[ -f "$DIST_TUNE" ]]; then
+    if grep -q "SCRIPT_DIR" "$DIST_TUNE" && ! grep -q "/home/llm/" "$DIST_TUNE"; then
+        pass "dist-tune.py uses SCRIPT_DIR (no hardcoded paths)"
+    else
+        fail "dist-tune.py has hardcoded paths or missing SCRIPT_DIR"
+    fi
+fi
+
+# Verify README documents --dist
+if grep -q "\-\-dist" "$SCRIPT_DIR/README.md"; then
+    pass "README documents --dist flag"
+else
+    fail "README missing --dist documentation"
+fi
+
+# Verify AGENTS.md documents new components
+if grep -q "detect.py" "$SCRIPT_DIR/AGENTS.md" && grep -q "dist-tune.py" "$SCRIPT_DIR/AGENTS.md"; then
+    pass "AGENTS.md documents lib/detect.py and dist-tune.py"
+else
+    fail "AGENTS.md missing new component documentation"
+fi
+
 # ── Script syntax validation ───────────────────────────────────────
 
 printf "\n\033[1m  Script syntax\033[0m\n"

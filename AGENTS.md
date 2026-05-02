@@ -12,7 +12,9 @@ saves optimal configs as JSON, and deploys them via `docker cp`.
 vllm-tune.sh                ← Main entry point (orchestrator)
 ├── tune-moe.sh             ← MoE fused expert dispatch tuning
 ├── tune-fp8.sh             ← FP8 block-scaled GEMM tuning
+├── dist-tune.py            ← Distributed tuning across cluster nodes
 ├── lib/common.sh           ← Shared utilities (sourced by tune-*.sh)
+├── lib/detect.py           ← Centralized model arch & shape detection
 ├── mod/run.sh              ← Container mod for persistent deployment
 └── configs/                ← Config store (pre-shipped + user-generated)
     └── <model-slug>/tp<N>/
@@ -48,8 +50,10 @@ vllm-tune.sh                ← Main entry point (orchestrator)
 |------|------|-------------------------|
 | `vllm-tune.sh` | CLI parsing, tmux, deploy, mod sync, arch detection, metadata | Yes |
 | `tune-moe.sh` | MoE benchmark loop (calls `benchmark_moe.py` via git sparse-checkout) | Yes |
-| `tune-fp8.sh` | FP8 benchmark loop (inline Python Triton benchmark) | Yes |
+| `tune-fp8.sh` | FP8 benchmark loop (Triton autotuning benchmark) | Yes |
+| `dist-tune.py` | Distributed orchestration (Rich dashboard, worker pool, rsync) | Yes |
 | `lib/common.sh` | Shared functions (MUST be updated if changing retry/merge/report behavior) | Careful — sourced by both tune scripts |
+| `lib/detect.py` | Centralized MoE/dense detection + FP8 shape detection | Yes — consumed by vllm-tune.sh, tune-fp8.sh, dist-tune.py |
 | `mod/run.sh` | Runs inside container at startup — copies JSON configs into vLLM paths | Yes |
 | `tests/test-vllm-tune.sh` | Offline test suite (no Docker/GPU required) | Yes |
 | `configs/` | JSON kernel configs — tracked in git, never auto-deleted | Append-only |
@@ -86,8 +90,15 @@ vllm-tune.sh                ← Main entry point (orchestrator)
 
 ### Architecture detection (MoE vs dense)
 
-`vllm-tune.sh` detects model architecture before dispatching to `tune-moe.sh`.
-This runs `get_config()` inside the container and checks `num_local_experts`.
+All model detection logic is centralized in `lib/detect.py`. This single
+Python module is `cat`-piped into the container via `docker exec` and outputs
+structured JSON. It is consumed by `vllm-tune.sh` (arch detection),
+`tune-fp8.sh` (shape detection), and `dist-tune.py` (both).
+
+Detection checks both `num_local_experts` (standard) and `n_routed_experts`
+(DeepSeek-V3/V4) to identify MoE models. Shape detection covers QKV
+projections, attention output, linear attention (Mamba), shared experts, dense
+FFN, and MoE expert FFN (`moe_intermediate_size` for DeepSeek).
 
 - **`--mode all` + dense model**: MoE phase is skipped with informative message,
   FP8 tuning proceeds normally
@@ -95,9 +106,35 @@ This runs `get_config()` inside the container and checks `num_local_experts`.
 - **`--dry-run`**: Detection is skipped (no container needed)
 - **Detection failure**: Falls back to `IS_MOE=false` (safe default — skips MoE)
 
-The detection code lives in `vllm-tune.sh` near the `# Architecture detection`
+The gating logic lives in `vllm-tune.sh` near the `# Architecture detection`
 comment block. It does NOT modify `tune-moe.sh` — the gating is an
 orchestration concern.
+
+**Rule**: If you add new model config attributes to detect, update
+`lib/detect.py` — the consumers (`vllm-tune.sh`, `tune-fp8.sh`, `dist-tune.py`)
+parse its JSON output and don't need changes.
+
+### Distributed tuning (`--dist`)
+
+`vllm-tune.sh --dist` delegates to `dist-tune.py`, which orchestrates tuning
+across multiple cluster nodes.
+
+```
+1. Discover nodes (--nodes flag, CLUSTER_NODES env, or .env file)
+2. Detect arch + shapes via lib/detect.py (on head node's container)
+3. Build task queue: MoE batch sizes + FP8 shapes
+4. Scan local configs → skip already-tuned items (resume support)
+5. rsync repo to remote nodes
+6. Dispatch tasks: each node runs vllm-tune.sh for one item at a time
+7. After each task: rsync configs back → deep-merge into head node
+8. Rich TUI dashboard shows live status per node
+```
+
+- **Node discovery**: `--nodes` flag > `CLUSTER_NODES` env > `~/spark-vllm-docker/.env`
+- **Resume**: Scans JSON config files for existing batch size keys
+- **Merge**: Deep merge matching `jq -s '.[0] * .[1]'` semantics
+- **Cleanup**: Ctrl-C kills remote tuning processes via SSH
+- **Dependency**: Requires `pip install rich` on the head node
 
 ### Adding support for a new tuning mode
 
@@ -186,8 +223,10 @@ The test suite covers:
 - Model slug generation
 - Dry-run flow (mode selection, phase headers, flag passthrough)
 - Config path construction
-- Architecture detection gating (code presence, message text)
-- Script syntax validation (all `.sh` files)
+- Architecture detection gating (lib/detect.py presence, detection attributes)
+- DeepSeek-V3/V4 support (n_routed_experts, moe_intermediate_size, V4 sed patch)
+- Distributed tuning (`--dist` flag, `dist-tune.py` presence)
+- Script syntax validation (all `.sh` files + Python files)
 - Documentation checks (README + AGENTS.md)
 
 Tests exit with code 0 on success, non-zero on failure.
@@ -225,6 +264,7 @@ Tests exit with code 0 on success, non-zero on failure.
 | `PEER_NODES` | lib/common.sh | SSH peers for cache clearing |
 | `DROP_CACHES_CMD` | lib/common.sh | Custom cache-drop command |
 | `MAX_RETRIES` | tune-*.sh | Retry count per tuning item (default: 1) |
+| `CLUSTER_NODES` | dist-tune.py | Comma-separated node IPs for `--dist` |
 
 ---
 
