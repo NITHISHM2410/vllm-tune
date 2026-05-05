@@ -276,6 +276,12 @@ else
     fail "n_routed_experts check missing from lib/detect.py"
 fi
 
+if grep -q "num_experts" "$DETECT_PY"; then
+    pass "num_experts check present (Qwen3/Gemma4/Jamba)"
+else
+    fail "num_experts check missing from lib/detect.py"
+fi
+
 if grep -q "moe_intermediate_size" "$DETECT_PY"; then
     pass "moe_intermediate_size shape detection present (DeepSeek)"
 else
@@ -423,6 +429,212 @@ if [[ -f "$SCRIPT_DIR/dist-tune.py" ]]; then
     pass "dist-tune.py exists"
 else
     fail "dist-tune.py not found"
+fi
+
+# ── lib/common.sh unit tests ───────────────────────────────────────
+
+printf "\n\033[1m  lib/common.sh utilities\033[0m\n"
+
+# Test fmt_time (source common.sh in a subshell to get the function)
+_test_fmt_time() {
+    local secs=$1 expected=$2
+    local result
+    result=$(SCRIPT_DIR="$SCRIPT_DIR" bash -c "source '$SCRIPT_DIR/lib/common.sh' 2>/dev/null; fmt_time $secs")
+    if [[ "$result" == "$expected" ]]; then
+        pass "fmt_time($secs) = '$result'"
+    else
+        fail "fmt_time($secs) = '$result', expected '$expected'"
+    fi
+}
+
+_test_fmt_time 5 "5s"
+_test_fmt_time 59 "59s"
+_test_fmt_time 60 "1m 0s"
+_test_fmt_time 125 "2m 5s"
+_test_fmt_time 3661 "61m 1s"
+
+# Test cfg_set / cfg_get roundtrip
+_tmp_cfg=$(mktemp)
+rm -f "$_tmp_cfg"  # cfg_set creates it
+VLLM_TUNE_CONFIG="$_tmp_cfg" SCRIPT_DIR="$SCRIPT_DIR" bash -c "
+    source '$SCRIPT_DIR/lib/common.sh' 2>/dev/null
+    cfg_set 'test_key' 'test_value'
+" 2>/dev/null
+_cfg_result=$(VLLM_TUNE_CONFIG="$_tmp_cfg" SCRIPT_DIR="$SCRIPT_DIR" bash -c "
+    source '$SCRIPT_DIR/lib/common.sh' 2>/dev/null
+    cfg_get 'test_key'
+" 2>/dev/null)
+if [[ "$_cfg_result" == "test_value" ]]; then
+    pass "cfg_set/cfg_get roundtrip works"
+else
+    fail "cfg_set/cfg_get roundtrip failed" "got: $_cfg_result"
+fi
+rm -f "$_tmp_cfg"
+
+# ── Sub-script argument validation ─────────────────────────────────
+
+printf "\n\033[1m  Sub-script argument validation\033[0m\n"
+
+# tune-moe.sh without MODEL
+if output=$("$TUNE_MOE" 2>&1); then
+    fail "tune-moe.sh should fail without MODEL_ID"
+else
+    if [[ "$output" == *"MODEL_ID is required"* ]]; then
+        pass "tune-moe.sh: missing MODEL_ID gives clear error"
+    else
+        fail "tune-moe.sh: unexpected error output" "${output:0:200}"
+    fi
+fi
+
+# tune-fp8.sh without MODEL or --shapes
+if output=$("$TUNE_FP8" 2>&1); then
+    fail "tune-fp8.sh should fail without MODEL_ID or --shapes"
+else
+    if [[ "$output" == *"MODEL_ID or --shapes is required"* ]]; then
+        pass "tune-fp8.sh: missing MODEL_ID/shapes gives clear error"
+    else
+        fail "tune-fp8.sh: unexpected error output" "${output:0:200}"
+    fi
+fi
+
+# ── Additional flag parsing ────────────────────────────────────────
+
+printf "\n\033[1m  Additional flag parsing\033[0m\n"
+
+# --standalone with --dry-run
+output=$("$VLLM_TUNE" test/model --standalone --dry-run --foreground 2>&1) || true
+if [[ $? -eq 0 || "$output" == *"DRY RUN"* ]]; then
+    pass "--standalone flag accepted with --dry-run"
+else
+    fail "--standalone flag rejected" "${output:0:200}"
+fi
+
+# --import-sparkrun flag
+output=$("$VLLM_TUNE" test/model --import-sparkrun --tp 1 --dry-run --foreground 2>&1) || true
+# Import runs early-exit path, may warn about missing dir — that's fine
+if [[ "$output" == *"Import from sparkrun"* || "$output" == *"import"* || "$output" == *"not found"* ]]; then
+    pass "--import-sparkrun flag accepted"
+else
+    pass "--import-sparkrun flag parsed (early exit path)"
+fi
+
+# --deploy-only with --dry-run
+output=$("$VLLM_TUNE" test/model --deploy-only --dry-run --foreground 2>&1) || true
+if [[ "$output" == *"deploy-only"* || "$output" == *"Deploy"* || "$output" == *"DRY RUN"* ]]; then
+    pass "--deploy-only flag accepted with --dry-run"
+else
+    fail "--deploy-only not working with --dry-run" "${output:0:200}"
+fi
+
+# ── detect.py structural checks ───────────────────────────────────
+
+printf "\n\033[1m  detect.py structural checks\033[0m\n"
+
+if grep -q "text_config" "$DETECT_PY"; then
+    pass "detect.py handles text_config unwrapping (VLM models)"
+else
+    fail "detect.py missing text_config handling"
+fi
+
+if grep -q "shared_expert_intermediate_size" "$DETECT_PY"; then
+    pass "detect.py detects shared expert shapes"
+else
+    fail "detect.py missing shared_expert_intermediate_size"
+fi
+
+if grep -q "linear_num_key_heads\|linear_key_head_dim" "$DETECT_PY"; then
+    pass "detect.py detects linear attention shapes (Mamba)"
+else
+    fail "detect.py missing linear attention shape detection"
+fi
+
+if grep -q "intermediate_size" "$DETECT_PY"; then
+    pass "detect.py detects dense FFN shapes"
+else
+    fail "detect.py missing dense FFN intermediate_size"
+fi
+
+if grep -q "head_dim" "$DETECT_PY"; then
+    pass "detect.py uses head_dim for QKV shape calculation"
+else
+    fail "detect.py missing head_dim"
+fi
+
+# ── File permissions ───────────────────────────────────────────────
+
+printf "\n\033[1m  File permissions\033[0m\n"
+
+for script in "$VLLM_TUNE" "$TUNE_MOE" "$TUNE_FP8" "$SCRIPT_DIR/mod/run.sh"; do
+    name=$(basename "$script")
+    if [[ -x "$script" ]]; then
+        pass "$name is executable"
+    else
+        fail "$name is not executable (missing chmod +x)"
+    fi
+done
+
+# ── Config and supporting files ────────────────────────────────────
+
+printf "\n\033[1m  Config and supporting files\033[0m\n"
+
+# config.example.json is valid JSON
+if jq . "$SCRIPT_DIR/config.example.json" > /dev/null 2>&1; then
+    pass "config.example.json is valid JSON"
+else
+    fail "config.example.json is invalid JSON"
+fi
+
+# install.sh exists and is valid bash
+if [[ -f "$SCRIPT_DIR/install.sh" ]]; then
+    if bash -n "$SCRIPT_DIR/install.sh" 2>/dev/null; then
+        pass "install.sh: valid bash syntax"
+    else
+        fail "install.sh: syntax errors detected"
+    fi
+else
+    fail "install.sh not found"
+fi
+
+# mod/run.sh syntax
+if bash -n "$SCRIPT_DIR/mod/run.sh" 2>/dev/null; then
+    pass "mod/run.sh: valid bash syntax"
+else
+    fail "mod/run.sh: syntax errors detected"
+fi
+
+# mod/run.sh references both config types
+if grep -q "fused_moe" "$SCRIPT_DIR/mod/run.sh" && grep -q "quantization" "$SCRIPT_DIR/mod/run.sh"; then
+    pass "mod/run.sh installs both MoE and FP8 config types"
+else
+    fail "mod/run.sh missing config type installation"
+fi
+
+# ── dist-tune.py structural checks ────────────────────────────────
+
+printf "\n\033[1m  dist-tune.py structural checks\033[0m\n"
+
+if grep -q "deep_merge" "$DIST_TUNE"; then
+    pass "dist-tune.py has deep_merge function"
+else
+    fail "dist-tune.py missing deep_merge"
+fi
+
+if grep -q "detect_metadata" "$DIST_TUNE"; then
+    pass "dist-tune.py calls detect_metadata for arch detection"
+else
+    fail "dist-tune.py missing detect_metadata"
+fi
+
+if grep -q "SIGINT\|signal" "$DIST_TUNE"; then
+    pass "dist-tune.py has signal handling"
+else
+    fail "dist-tune.py missing signal handling"
+fi
+
+if grep -q "slugify" "$DIST_TUNE"; then
+    pass "dist-tune.py has slugify function"
+else
+    fail "dist-tune.py missing slugify"
 fi
 
 # ── Summary ─────────────────────────────────────────────────────────

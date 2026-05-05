@@ -4,7 +4,7 @@
 # ─────────────────────────────────────────────────────────────────────
 #
 # Single source of truth for detecting:
-#   - MoE vs dense architecture (num_local_experts, n_routed_experts)
+#   - MoE vs dense architecture (num_local_experts, n_routed_experts, num_experts)
 #   - FP8 GEMM (N,K) shapes from model config
 #
 # Runs inside a Docker container via:
@@ -33,7 +33,9 @@ def _get_text_config(model):
 def detect_arch(model):
     """Return 'moe' or 'dense' based on expert count attributes."""
     tc = _get_text_config(model)
-    E = getattr(tc, 'num_local_experts', 0) or getattr(tc, 'n_routed_experts', 0)
+    E = (getattr(tc, 'num_local_experts', 0)
+         or getattr(tc, 'n_routed_experts', 0)
+         or getattr(tc, 'num_experts', 0))
     return 'moe' if E and int(E) > 0 else 'dense'
 
 

@@ -95,10 +95,11 @@ Python module is `cat`-piped into the container via `docker exec` and outputs
 structured JSON. It is consumed by `vllm-tune.sh` (arch detection),
 `tune-fp8.sh` (shape detection), and `dist-tune.py` (both).
 
-Detection checks both `num_local_experts` (standard) and `n_routed_experts`
-(DeepSeek-V3/V4) to identify MoE models. Shape detection covers QKV
-projections, attention output, linear attention (Mamba), shared experts, dense
-FFN, and MoE expert FFN (`moe_intermediate_size` for DeepSeek).
+Detection checks `num_local_experts` (Mixtral/MiniMax), `n_routed_experts`
+(DeepSeek-V3/V4), and `num_experts` (Qwen3/Gemma4/Jamba) to identify MoE
+models. Shape detection covers QKV projections, attention output, linear
+attention (Mamba), shared experts, dense FFN, and MoE expert FFN
+(`moe_intermediate_size` for DeepSeek).
 
 - **`--mode all` + dense model**: MoE phase is skipped with informative message,
   FP8 tuning proceeds normally
@@ -218,15 +219,24 @@ fails. If vLLM changes its internal config directory structure, update:
 ```
 
 The test suite covers:
-- Version and help output
+- Version and help output (all 3 scripts)
 - Argument validation (missing model, invalid mode, unknown flags)
-- Model slug generation
+- Sub-script argument validation (tune-moe.sh, tune-fp8.sh)
+- Model slug generation (6 patterns)
 - Dry-run flow (mode selection, phase headers, flag passthrough)
 - Config path construction
+- Custom batch sizes and shapes passthrough
 - Architecture detection gating (lib/detect.py presence, detection attributes)
-- DeepSeek-V3/V4 support (n_routed_experts, moe_intermediate_size, V4 sed patch)
-- Distributed tuning (`--dist` flag, `dist-tune.py` presence)
-- Script syntax validation (all `.sh` files + Python files)
+- MoE detection attributes (num_local_experts, n_routed_experts, num_experts)
+- DeepSeek-V3/V4 support (moe_intermediate_size, V4 sed patch)
+- detect.py structural checks (text_config, shared experts, linear attention, FFN, head_dim)
+- Flag parsing (--standalone, --deploy-only, --import-sparkrun, --export-sparkrun, --dist)
+- Distributed tuning (dist-tune.py existence, deep_merge, signal handling, slugify)
+- File permissions (all executable scripts)
+- Script syntax validation (all .sh files including install.sh, mod/run.sh + Python files)
+- Config file validation (config.example.json)
+- mod/run.sh structural checks (installs both MoE and FP8 config types)
+- lib/common.sh unit tests (fmt_time, cfg_set/cfg_get roundtrip)
 - Documentation checks (README + AGENTS.md)
 
 Tests exit with code 0 on success, non-zero on failure.
