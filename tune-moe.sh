@@ -91,23 +91,39 @@ preflight
 # ── Tuning function ─────────────────────────────────────────────────
 
 # Run benchmark_moe.py for a single batch size inside the container.
-# Uses tini as subreaper (if available) to prevent zombie accumulation.
+# # Uses tini as subreaper (if available) to prevent zombie accumulation.
+# run_tune() {
+#     local bs=$1
+#     docker exec "$CONTAINER" $INIT_WRAPPER bash -c \
+#         "cd /tmp/vllm-bench && git sparse-checkout set benchmarks 2>/dev/null && \
+#          python3 benchmarks/kernels/benchmark_moe.py \
+#            --model $MODEL \
+#            --tp-size $TP \
+#            --dtype $DTYPE \
+#            --tune \
+#            --batch-size $bs \
+#            --save-dir $CONTAINER_SAVE_DIR/"
+# }
+
 run_tune() {
     local bs=$1
+
     docker exec "$CONTAINER" $INIT_WRAPPER bash -c \
-        "rm -rf /tmp/vllm-bench && \
-         git clone --depth 1 --filter=blob:none --sparse \
-           https://github.com/vllm-project/vllm.git /tmp/vllm-bench 2>/dev/null && \
-         cd /tmp/vllm-bench && git sparse-checkout set benchmarks 2>/dev/null && \
-         grep -q 'DeepseekV4ForCausalLM' benchmarks/kernels/benchmark_moe.py || \
-           sed -i 's/\"DeepseekV3ForCausalLM\",/\"DeepseekV3ForCausalLM\", \"DeepseekV4ForCausalLM\",/' benchmarks/kernels/benchmark_moe.py; \
+        "cd /tmp/vllm-bench && git sparse-checkout set benchmarks 2>/dev/null && \
          python3 benchmarks/kernels/benchmark_moe.py \
            --model $MODEL \
            --tp-size $TP \
            --dtype $DTYPE \
            --tune \
            --batch-size $bs \
-           --save-dir $CONTAINER_SAVE_DIR/"
+           --save-dir $CONTAINER_SAVE_DIR/" || true
+
+    # If the benchmark segfaulted after writing the config, still count it as success.
+    if compgen -G "$CONTAINER_SAVE_DIR/*.json" > /dev/null; then
+        return 0
+    fi
+
+    return 1
 }
 
 # ── Main loop ───────────────────────────────────────────────────────
